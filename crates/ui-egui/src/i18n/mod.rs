@@ -74,8 +74,18 @@ fn plural_fr(n: u64) -> usize {
     usize::from(n > 1)
 }
 
+/// Polish (CLDR `pl`): 1 → one; 2–4, 22–24, 32–34 ... (but not 12–14) → few; everything else
+/// (0, 5–21, 25–31 ...) → many.
+fn plural_pl(n: u64) -> usize {
+    match n {
+        1 => 0,
+        _ if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) => 1,
+        _ => 2,
+    }
+}
+
 /// The registry. English first: it is the fallback and the source language.
-pub static LANGUAGES: [LangInfo; 8] = [
+pub static LANGUAGES: [LangInfo; 9] = [
     LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, catalog: OnceLock::new() },
     LangInfo { code: "ja", name: "日本語", source: include_str!("ja.tsv"), plural: plural_none, catalog: OnceLock::new() },
     // Simplified Chinese; `zh`, `zh-CN`, `zh-SG` and `zh-Hans-*` locales resolve here (see `candidates`).
@@ -90,6 +100,8 @@ pub static LANGUAGES: [LangInfo; 8] = [
     LangInfo { code: "es", name: "Español", source: include_str!("es.tsv"), plural: plural_one_other, catalog: OnceLock::new() },
     // French; every `fr-*` locale (`fr-FR`, `fr-CA`, `fr-BE` ...) resolves here.
     LangInfo { code: "fr", name: "Français", source: include_str!("fr.tsv"), plural: plural_fr, catalog: OnceLock::new() },
+    // Polish; every `pl-*` locale (`pl-PL` ...) resolves here.
+    LangInfo { code: "pl", name: "Polski", source: include_str!("pl.tsv"), plural: plural_pl, catalog: OnceLock::new() },
 ];
 
 impl LangInfo {
@@ -793,10 +805,9 @@ mod tests {
         }
     }
 
-    /// Direct tl! and i18n::t labels must not silently fall back to English in the complete catalog.
-    #[test]
-    fn simplified_chinese_covers_ui_literals() {
-        let zh = Lang::from_code("zh-hans").expect("zh-hans registered");
+    /// Every `tl!("literal")` and `i18n::t("literal")` label in the UI source outside tests, including
+    /// literals split over lines, so complete catalogs are checked against the UI rather than each other.
+    fn ui_literals() -> std::collections::BTreeSet<String> {
         let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
         let mut literals = std::collections::BTreeSet::new();
         while let Some(dir) = stack.pop() {
@@ -841,7 +852,14 @@ mod tests {
             }
         }
         assert!(literals.len() > 900, "source scan found only {} literals", literals.len());
-        let missing: Vec<_> = literals.iter().filter(|label| !has(zh, label)).collect();
+        literals
+    }
+
+    /// Direct tl! and i18n::t labels must not silently fall back to English in the complete catalog.
+    #[test]
+    fn simplified_chinese_covers_ui_literals() {
+        let zh = Lang::from_code("zh-hans").expect("zh-hans registered");
+        let missing: Vec<_> = ui_literals().into_iter().filter(|label| !has(zh, label)).collect();
         assert!(missing.is_empty(), "untranslated Simplified Chinese UI literals: {missing:#?}");
     }
 
@@ -996,6 +1014,94 @@ mod tests {
         assert_eq!(fmt(t("This page couldn't be displayed.\n{e}"), &[("e", "OS error {n}")]), "Impossible d'afficher cette page.\nOS error {n}");
         assert_eq!(fmt(t("{n} pages selected"), &[("n", "3")]), "3 pages sélectionnées");
         assert_eq!(tr(fr, "CheckBox"), "Case à cocher");
+        set_current(Lang::EN);
+    }
+
+    #[test]
+    fn polish_is_registered() {
+        let pl = Lang::from_code("pl").expect("pl registered");
+        assert_eq!(pl.name(), "Polski");
+        assert_eq!(normalize_pref("PL"), Some("pl"));
+        assert_eq!(normalize_pref("pl-PL"), None, "only exact codes are preferences");
+        assert_eq!(lang_from_tag("pl_PL.UTF-8"), Some(pl));
+        assert_eq!(lang_from_tag("pl-PL"), Some(pl));
+        assert_eq!(first_supported("pl-PL\r\nen-US"), Some(pl));
+        assert_eq!(tr(pl, "File"), "Plik");
+        assert_eq!(tr(pl, "Save as…"), "Zapisz jako…");
+        assert_eq!(tr(pl, "Zażółć gęślą jaźń.pdf"), "Zażółć gęślą jaźń.pdf");
+        let counts = [0, 1, 2, 4, 5, 12, 14, 21, 22, 25, 112, 122, 1001, u64::MAX];
+        assert_eq!(counts.map(pl.0.plural), [2, 0, 1, 1, 2, 2, 2, 2, 1, 2, 2, 1, 2, 2]);
+        assert_eq!(pl.0.plural_forms(), 3);
+        assert_eq!(trn(pl, 1, "{n} page", "{n} pages"), "1 strona");
+        assert_eq!(trn(pl, 3, "{n} page", "{n} pages"), "3 strony");
+        assert_eq!(trn(pl, 5, "{n} page", "{n} pages"), "5 stron");
+        assert_eq!(trn(pl, 13, "{n} page", "{n} pages"), "13 stron");
+        assert_eq!(trn(pl, 22, "{n} page", "{n} pages"), "22 strony");
+        assert_eq!(trn(pl, 0, "{n} field", "{n} fields"), "0 pól");
+        let mut app = crate::PdfCraftApp::default();
+        app.set_option("language", "pl").unwrap();
+        assert_eq!(app.language, "pl");
+        let mut restored = crate::PdfCraftApp::default();
+        restored.restore(&app.persist());
+        assert_eq!(restored.language, "pl");
+    }
+
+    /// Polish translates every registered command, menu and All tools group, section and item.
+    #[test]
+    fn polish_covers_commands_and_catalogue() {
+        let pl = Lang::from_code("pl").expect("pl registered");
+        for command in pdfcraft_engine::commands::COMMANDS {
+            assert!(has(pl, command.label), "missing command: {}", command.label);
+            if let Some(menu) = command.menu {
+                assert!(has(pl, menu), "missing menu: {menu}");
+            }
+        }
+        for group in pdfcraft_engine::catalog::TOOL_GROUPS {
+            assert!(has(pl, group.label), "missing group: {}", group.label);
+            for section in group.sections {
+                assert!(has(pl, section.title), "missing section: {}", section.title);
+                for item in section.items {
+                    assert!(has(pl, item.label), "missing item: {}", item.label);
+                }
+            }
+        }
+    }
+
+    /// Every tl! and i18n::t label has a Polish entry, and no entry is left in English by mistake.
+    #[test]
+    fn polish_covers_ui_literals() {
+        let pl = Lang::from_code("pl").expect("pl registered");
+        let missing: Vec<_> = ui_literals().into_iter().filter(|label| !has(pl, label)).collect();
+        assert!(missing.is_empty(), "untranslated Polish UI literals: {missing:#?}");
+        for label in ["About", "Contributors", "Models"].into_iter().chain(crate::credits::MODEL_COLUMNS) {
+            assert!(has(pl, label), "missing About label: {label}");
+        }
+        for mode in crate::credits::NameMode::ALL {
+            assert!(has(pl, mode.label()), "missing name mode: {}", mode.label());
+        }
+        for key in crate::credits::SortKey::ALL {
+            let (label, header) = key.label();
+            for text in [label, header] {
+                assert!(has(pl, text), "missing contributor sort/header: {text}");
+            }
+        }
+        let (entries, _) = parse_entries(pl.0.source, pl.0.plural_forms());
+        for e in &entries {
+            assert!(!e.translation.contains("..."), "use … rather than three dots: {:?}", e.translation);
+        }
+    }
+
+    #[test]
+    fn polish_history_and_diagnostics_preserve_user_values() {
+        let pl = Lang::from_code("pl").expect("pl registered");
+        set_current(pl);
+        assert_eq!(command_label("Undo Insert pages from Raport {n}.pdf"), "Cofnij Wstaw strony z pliku Raport {n}.pdf");
+        assert_eq!(command_label("Redo Fill in Kontakt {key}"), "Ponów Wypełnij: Kontakt {key}");
+        assert_eq!(action_label("Change Title"), "Zmień: Tytuł");
+        assert_eq!(action_label("Custom action {n}"), "Custom action {n}");
+        assert_eq!(fmt(t("This page couldn't be displayed.\n{e}"), &[("e", "OS error {n}")]), "Nie udało się wyświetlić tej strony.\nOS error {n}");
+        assert_eq!(fmt(t("{n} pages selected"), &[("n", "3")]), "Zaznaczone strony: 3");
+        assert_eq!(tr(pl, "CheckBox"), "Pole wyboru");
         set_current(Lang::EN);
     }
 
